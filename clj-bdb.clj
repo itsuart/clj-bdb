@@ -1,38 +1,47 @@
-(ns bdb
+(ns clj-bdb
   (:import (com.sleepycat.je Database DatabaseConfig Environment EnvironmentConfig DatabaseEntry OperationStatus LockMode))
   (:import java.io.File)
+  (:import com.sleepycat.bind.tuple.TupleBinding)
 )
+
+;------------------ HELPERS
+
+(defn- to-database-entry [what]
+  (let [binder (TupleBinding/getPrimitiveBinding (.getClass what))]
+    (if binder
+       (let [result (DatabaseEntry.)] (.objectToEntry binder what result) result)
+       (DatabaseEntry. what))))
+
+;------------------ PUBLIC API
 
 (defn open-or-create [env-path name]
   (let [db-env (Environment. (File. env-path) (doto (EnvironmentConfig.) (.setAllowCreate true)))]
     (.openDatabase db-env nil name (doto (DatabaseConfig.) (.setAllowCreate true)))))
 
-(defn sync [db]
+(defn sync [#^Database db]
   (doto db .sync))
 
-(defn close [db]
+(defn close [#^Database db]
   (.close db))
 
 (defn put [#^Database db key value]
-  (.put db nil (DatabaseEntry. key) (DatabaseEntry. value))
+  (.put db nil (to-database-entry key) (DatabaseEntry. value))
   db)
 
-(defn get [db key]
+(defn get [#^Database db key]
   (let [value (DatabaseEntry.)]
-    (when (= OperationStatus/SUCCESS (.get db nil (DatabaseEntry. key) value LockMode/DEFAULT))
+    (when (= OperationStatus/SUCCESS (.get db nil (to-database-entry key) value LockMode/DEFAULT))
       (.getData value))))
 
-(defn delete-record [db key]
-  (.delete db nil (DatabaseEntry. key))
-  db)
+(defn delete-record [#^Database db key]
+  (doto db (.delete  nil (to-database-entry key)))
 
 (defn fetch-all 
-  ([db callback]
-  "iterates over all db contents, calls callback on each row and put its result to array"
-  (with-open [cursor (.openCursor db nil nil)]
-      (fetch-all cursor callback ())))
-  ([cursor callback result]
-    (let [found-key (DatabaseEntry.) found-value (DatabaseEntry.)]
-     (if (not (= OperationStatus/SUCCESS (.getNext cursor found-key found-value LockMode/DEFAULT))) 
-       result
-       (recur cursor callback (conj result (callback (.getData found-key) (.getData found-value))))))))
+  ([#^Database db]
+     (let [found-key (DatabaseEntry.) found-value (DatabaseEntry.) cursor (.openCursor db nil nil)]
+       (letfn [(get-next []
+			 (if (not= OperationStatus/SUCCESS (.getNext cursor found-key found-value LockMode/DEFAULT))
+			   (.close cursor)
+			   (lazy-seq (cons (map #(.getData %) [found-key found-value]) (recur)))))]
+	 (get-next))))
+{:doc "Lazily loads all content of the db. Returns a sequence of vectors [key value]"})
